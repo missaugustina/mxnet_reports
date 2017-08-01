@@ -1,0 +1,665 @@
+---
+title: "Mxnet Authors"
+author: "Augustina Ragwitz"
+date: "July 17, 2017"
+output: html_document
+params:
+  mx_path: "incubator-mxnet"
+  mx_sha: '92a93b80'
+  mx_out: 'data/mxnet_gitlog.txt'
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(ggplot2)
+library(gh)
+library(readr)
+library(reshape2)
+library(stringr)
+library(tidyr)
+library(zoo)
+```
+
+# Overview
+
+This notebook lives in Github and is the first in a series: https://github.com/missaugustina/tensorflow_reports
+
+# Commit History
+
+Use the "git log" command to extract commit history. The "pretty" option allows the log output to be formatted.
+
+```{r}
+git_log_cmd <- paste0('cd ', params$mx_path, 
+                     '; git log ', params$mx_sha, 
+                     #' --no-merges ',
+                     ' --date=short --pretty=tformat:"%ad|%an|%ae|%h" > ../', params$mx_out)
+system(git_log_cmd)
+
+git_log_cmd
+```
+
+
+```{r mx_raw}
+mx_raw <- read.csv(params$mx_out, header = FALSE, sep = "|", quote="",
+                     col.names=c("git_log_date", "name", "email", "sha"))
+
+# add date formatting so these sort properly
+mx_parsed_dates <- mx_raw %>% 
+  mutate(commit_date=as.Date(git_log_date, tz="UTC"),
+         commit_month=as.yearmon(commit_date),
+         name=str_to_lower(name),
+         email=str_to_lower(email)) %>% 
+  select(commit_date, commit_month, name, email, sha)
+```
+
+## Normalize Authors
+
+Authors use different names and email addresses, so to get an accurate count of unique authors, we need to consolidate them. This method uses the first email address found in the commit log for an author as the authoritative one. While other methods should be explored and compared for better accuracy, this is sufficient to identify unique authors.
+
+Previous consolidation attempts found the following authors having deviations. Because they were a minority, they are simply updated manually.
+
+```{r parsed_emails}
+# manual updates for known authors that make things complicated
+mx_parsed_emails <- mx_parsed_dates %>% 
+  mutate(name=ifelse(name=="tornadomeet", "wei wu", name),
+         name=ifelse(name=="yuan (terry) tang" | name == "terrytangyuan", "terry tang", name),
+         name=ifelse(name=="el potaeto" | name=="pommedeterresautee", "michaël benesty", name),
+         name=ifelse(name=="=", "luke metz", name))
+
+# known email provider domains
+email_provider_domains <- c("gmail.com", 
+                            "users.noreply.github.com",
+                            "hotmail.com",
+                            "googlemail.com",
+                            "qq.com",
+                            "126.com",
+                            "163.com",
+                            "outlook.com",
+                            "me.com",
+                            "live.com",
+                            "yahoo.com", # manual verification showed these are not yahoo employees
+                            "yahoo.fr")
+
+#rm(mx_parsed_dates)
+```
+
+```{r normalize_authors}
+# create an authoritative email address
+# all matching emails should have the same sha
+mx_gh_authors_by_email <- mx_parsed_emails %>%
+  arrange(desc(commit_date)) %>%
+  group_by(email, name) %>%
+  summarise(num_commits = n(), 
+            last_commit=max(commit_date))
+
+source("normalize_authors.R")
+mx_gh_authors_lookup <- build_authors_lookup(mx_gh_authors_by_email, email_provider_domains)
+
+mx_parsed_authors <- merge(mx_parsed_emails, mx_gh_authors_lookup, by=c("email"), all=TRUE)
+mx_parsed_authors <- unique(mx_parsed_authors)
+
+# check that each SHA only has one author
+mx_parsed_authors_check <- mx_parsed_authors %>% group_by(sha) %>% mutate(n=n()) %>% filter(n>1)
+
+# TODO use an assert
+paste("Commits with more than one author (should be zero):", nrow(mx_parsed_authors_check))
+
+```
+
+```{r exclude_july}
+# exclude July for summaries
+mx_parsed <- mx_parsed_authors %>% filter(commit_month < "July 2017")
+```
+
+
+## Email Domain
+
+```{r email_domain}
+
+# Use host to identify author affiliation
+# commits per host
+mx_authors_hosts <- mx_parsed %>%
+  group_by(author, email_id_host) %>%
+  summarise(num_commits = n()) %>%
+  group_by(email_id_host) %>%
+  summarise(total_authors=n(), total_commits=sum(num_commits))
+
+# Commits and authors per host per month
+mx_authors_hosts_month <- mx_parsed %>%
+  group_by(commit_month, author, email_id_host) %>%
+  summarise(num_commits = n()) %>%
+  group_by(commit_month, email_id_host) %>%
+  summarise(num_authors=n(), num_commits=sum(num_commits))
+
+mx_authors_hosts_month_merge <- merge(mx_authors_hosts_month, 
+                                      mx_authors_hosts %>% 
+                                        select(email_id_host, total_authors, total_commits),
+                                      by="email_id_host")
+```
+
+# Data Summaries
+
+## By Month
+
+Commits are grouped by month and author to determine frequencies. Commit frequency bins are created using the rounded natural log of the total commits for the author. The output is a list of total commits and authors per month.
+
+```{r summaries_by_month}
+# commits per author
+mx_commits_by_author <- mx_parsed %>% 
+  group_by(commit_month, author) %>% 
+  summarise(num_author_commits=n())
+
+# authors per month
+mx_authors <- mx_commits_by_author %>% 
+  group_by(commit_month) %>% 
+  summarise(num_authors=n())
+
+# commits per month
+mx_commits_by_month <- mx_parsed %>% group_by(commit_month) %>% 
+  summarise(num_commits=n())
+
+# merge authors and commits per month
+mx_authors_commits = merge(mx_authors, mx_commits_by_month, by=c("commit_month"))
+
+# merge authors + commits per month with commits per author
+mx_commits_by_author <- merge(mx_commits_by_author, mx_authors_commits, by=c("commit_month"))
+
+# Calculate commits per author percent and log
+# the rounded log is used for frequency buckets 
+mx_commits_by_author <- mx_commits_by_author %>% 
+  mutate(commits_pct = num_author_commits/num_commits,
+         author_commits_log = round(log(num_author_commits)))
+
+# Calculate number of months the author shows up in
+mx_commits_by_author <- mx_commits_by_author %>%
+  group_by(author) %>%
+  mutate(commits_months=n())
+
+# determine min and max for each log bucket
+mx_commits_by_author <- mx_commits_by_author %>% 
+  group_by(author_commits_log) %>%
+  mutate(commits_min = min(num_author_commits), 
+         commits_max = max(num_author_commits))
+
+# Authors with just one commit month
+mx_commits_months_single <- mx_commits_by_author %>% 
+  filter(commits_months == 1) %>%
+  group_by(commit_month) %>%
+  summarise(num_authors_single=n())
+
+mx_authors_commits <- merge(mx_authors_commits, mx_commits_months_single, by=c("commit_month"))
+
+# clean up
+rm(mx_authors, mx_commits_by_month, mx_commits_months_single)
+```
+
+## By Author
+
+Commits are grouped by month and author and commit frequency bin.
+
+```{r commit_frequency}
+# remove the bot
+# mx_commits_by_author_nobot <- mx_commits_by_author %>% filter(author != "a. unique tensorflower")
+
+mx_commits_by_author_summary <- mx_commits_by_author %>% # was mx_commits_by_author_nobot
+  group_by(author, author_commits_log) %>%
+  summarise(
+    commit_freq = n(),# Months Pattern was Observed
+    commits_months = first(commits_months), 
+    commit_freq_pct = round(commit_freq/commits_months, 2), # proportion of months pattern was observed
+    author_commits_min = min(num_author_commits),
+    author_commits_max = max(num_author_commits),
+    commits_min = first(commits_min), 
+    commits_max = first(commits_max)) %>%
+  group_by(author) %>%
+  mutate(
+    freq_bins = n(), # number of months with different patterns
+    freq_bins_pct = round(freq_bins/commits_months, 2)) # proportion of months w/ same patterns
+# ex: 5 months -> commits log = 1, 1, 2, 3, 2 -> frequency = 1:2, 2:2, 3:1
+# commit_freq_pct: 1:2/5, 2:2/5, 3:1/5 <- out of 5 months how often that commit log was observed
+# freq_bins_pct: 3/5 months share the same commit log
+```
+
+# Github Comparison
+
+How different are metrics in the Gitlog compared to what Github reports?
+
+## Contributors
+
+On July 31, 2017, Github reported the total "contributors" is 391. We have 34 more authors than what is reported in Github.
+
+```{r check_authors}
+# authors stats
+mx_authors_total <- mx_parsed_authors %>% 
+  group_by(author) %>% 
+  summarise(email_id=first(email_id), commits=n())
+
+total_authors <- nrow(mx_authors_total)
+
+paste("Total Authors in Git Log:", total_authors)
+
+paste("Difference from Github:", total_authors - 391)
+```
+
+```{r, eval=FALSE}
+library(httr)
+library(jsonlite)
+
+url <- "https://api.github.com/repos/apache/incubator-mxnet/commits"
+
+query_params <- list(
+  client_id=params$gh_id, 
+  client_secret=params$gh_secret, 
+  per_page=100)
+
+get_gh_commits <- function (url, query) {
+  req <- GET(url, query=query)
+  print(paste(req$url))
+  json <- content(req, as = "text")
+  commits <- fromJSON(json, flatten=TRUE)
+  return(commits)
+}
+
+commits <- data_frame()
+for (n in 1:58) {
+  print(paste("Getting commits for page:", n))
+  commits <- bind_rows(commits, get_gh_commits(url, append(query_params, c(page=n))))
+  saveRDS(commits, paste0("commits/_commits_", n, ".rds"))
+}
+commits <- commits %>% mutate(sha_long=sha, sha = str_sub(sha_long, 1, 7))
+saveRDS(commits, "mxnet_commits.rds")
+```
+
+```{r}
+commits <-readRDS("mxnet_commits.rds")
+
+commits_check <- merge(mx_parsed_authors, commits, by="sha", all=TRUE)
+
+commits_check_summary <- commits_check %>%
+  group_by(author.login, email_id) %>% 
+  summarise(num_ids = n(), sha=first(sha))
+
+commits_authors_check <- merge(commits_check_summary,
+                               mx_authors_total,
+                               by="email_id", all = TRUE)
+
+commits_authors_check <- commits_authors_check %>% group_by(author) %>% mutate(num_ids=n())
+commits_author_missing <- commits_authors_check %>% filter(is.na(author)) %>% ungroup()
+commits_author_missing_join <- merge(
+  commits %>% select(sha, author.login, commit.committer.name, commit.committer.email), 
+  commits_author_missing %>% select(sha), by="sha")
+commits_author_missing_lookup <- merge(commits_author_missing_join, mx_gh_authors_lookup, 
+                                       by.x="commit.committer.email", by.y="email")
+
+# missing login, we've identified them with others but Github thinks they are unique
+commits_login_missing <- commits_authors_check %>% filter(is.na(author.login))
+paste("Github has", nrow(commits_login_missing), "more contributors than we do.")
+
+  
+```
+
+
+##  Pulse Report
+
+This Pulse report shows the same number of commits and 1 additional author. Since our total unique authors count is off by 6, and the number of commits is correct, we have to assume there is a problem with the author normalization. A manual verification of authors who had more than one distinct email address all pointed to the same Github accounts. Timezones could be another factor, this report uses UTC to normalize the time zones and it's not clear if Git is using local or UTC for its total. We can't recreate the Pulse snapshot because the tensorflow-gardener continually "rewrites" the commit log history.
+
+Overall a discrepancy of 1 author isn't significant. 
+
+According to the Github Pulse Report, "Excluding merges, 155 authors have pushed 838 commits to master and 850 commits to all branches. On master, 2,554 files have changed and there have been 147,210 additions and 122,083 deletions."
+
+![screenshot from Github Pulse Report - July 17, 2017](png/mx_github_pulse_2017-07-17.png)
+
+```{r}
+mx_pulse_check <- mx_parsed_authors %>% 
+  filter(commit_date > as.Date("2017-06-16"))
+
+mx_pulse_check_authors <- mx_pulse_check %>% 
+  group_by(author) %>% 
+  summarise(num_author_commits=n())
+
+total_authors_pulse_check <- nrow(mx_pulse_check_authors)
+paste("Total Unique Authors: ", total_authors_pulse_check)
+paste("Difference From Pulse Check: ", total_authors_pulse_check - 155)
+
+total_commits_pulse_check <- n_distinct(mx_pulse_check$sha)
+paste("Total Commits: ", total_commits_pulse_check)
+paste("Difference From Pulse Check: ", total_commits_pulse_check - 838)
+```
+
+Therefore, we can conclude that our methods for counting commits match Github's results. Despite our previous author discrepancy, the method appears to sufficiently accurate for the purposes of this analysis.
+
+# Authors
+
+## Unique Authors per Month
+
+The number of unique authors has grown steadily per month. With a huge spike in March 2017.
+
+```{r}
+ggplot(data = mx_authors_commits, aes(x = factor(commit_month))) +
+  geom_point(aes(y = num_authors, color="Authors"), group=1) +
+  geom_line(aes(y = num_authors, color="Authors"), group=1) +
+  ylab("Count") +
+  xlab("Month") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+## Proportion of Authors by Email Domain
+
+How many Google authors do we see? Tensorflow was originally a closed-source Google project that Google open sourced. It does not have an open governance model. Identifying the proportion of contributors that come from Google indicates the level of involvement from non-Google affliates.
+
+```{r}
+
+# All emails vs google.com
+ggplot(mx_authors_hosts_month %>% 
+         mutate(is_google=ifelse(email_id_host=="google.com" | email_id_host=="tensorflow.org", 
+                                 "Google", "Not Google")),
+       aes(x=factor(commit_month), y=num_authors, fill=is_google)) + 
+  geom_bar(stat="identity") +
+  xlab("Months") +
+  ylab("Authors") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Exclude Google + email-provider addresses
+# more than one overall author (otherwise there are too many to plot)
+ggplot(mx_authors_hosts_month_merge %>% 
+         filter( 
+           !email_id_host %in% email_provider_domains 
+           & (total_authors > 1 
+              & !(email_id_host == "google.com" | email_id_host =="tensorflow.org"))),
+       aes(x=factor(commit_month), y=num_authors, fill=reorder(email_id_host, -total_authors))) + 
+  geom_bar(stat="identity", position="dodge") +
+  xlab("Months") +
+  ylab("Authors") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  guides(fill=guide_legend(title="Hosts"))
+
+```
+
+# Authors vs Commits
+
+## Unique Authors vs Total Commits per Month
+
+Overall in the Tensorflow project, the number of authors and commits are not only increasing but appear to be correlated. Logically one can assume that more authors means more commits.
+
+```{r}
+ggplot(data = mx_authors_commits, aes(x = factor(commit_month))) +
+  geom_point(aes(y = num_authors*5, color="Authors (scaled)"), group=1) +
+  geom_line(aes(y = num_authors*5, color="Authors (scaled)"), group=1) +
+  geom_point(aes(y = num_commits, color="Commits"), group=2) +
+  geom_line(aes(y = num_commits, color="Commits"), group=2) +
+  ylab("Count") +
+  xlab("Month") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(data = mx_authors_commits, aes(x = num_commits, y = num_authors)) +
+  geom_point() +
+  geom_smooth(method="lm", se=FALSE) +
+  xlab("Commits") +
+  ylab("Authors")
+```
+
+## Unique Authors vs Commits per Author per Month
+
+How are commits per author distributed as the number of authors per month increases?
+
+As the number of authors increases the proportion of commits becomes more evenly distributed, so we see a downward trend in percent of commits per author. Early on in the project, more authors had a higher proportion of the commits.
+
+The second plot filters out the "A. Unique TensorFlower" bot which is clearly responsible for the largest proportion of commits as the number of authors increases. When internal Google commits are pushed upstream, authors that can't be matched to Github accounts get this account instead. 
+
+
+```{r}
+ggplot(data = mx_commits_by_author, aes(x = num_authors)) +
+  geom_jitter(aes(y=num_author_commits/2, color="Commits")) +
+  geom_jitter(aes(y=commits_pct * 100, color="Commits %")) + # scaled for comparison
+  geom_smooth(aes(y=commits_pct*100), method="lm", se=FALSE) +
+  xlab("Authors") +
+  ylab("Commits per Author (Scaled")
+
+ggplot(data = mx_commits_by_author %>% filter(author != "a. unique tensorflower"), 
+       aes(x = num_authors)) +
+  geom_jitter(aes(y=num_author_commits/2, color="Commits")) +
+  geom_jitter(aes(y=commits_pct*100, color="Commits %")) + # scaled for comparison
+  geom_smooth(aes(y=commits_pct*100), method="lm", se=FALSE) +
+  xlab("Authors") +
+  ylab("Commits per Author (Scaled)")
+
+```
+
+# Commits per Author
+
+## Commits Per Author Frequency
+
+What is the overall distribution for commits per author? How many commits do most authors make per month?
+
+Commits per author were grouped into bins based on the rounded natural log. The maximum value of that set is reported in the density plots below.
+
+The highest per month commit frequency seen is 1-4 per month.
+
+```{r}
+ggplot(mx_commits_by_author_nobot, aes(x=factor(commits_max))) + 
+  geom_density() +
+  xlab("Commits per Author")
+```
+
+How many months have authors been contributing? Earlier analysis indicated that there were less authors in 2015 when the project started than there are in 2017.
+
+The majority of Authors only have commits for 6 or less months.
+
+```{r}
+ggplot(mx_commits_by_author_nobot, aes(x=factor(commits_months))) + 
+  geom_bar() +
+  xlab("Author Months")
+```
+
+## Commits per Author Deviation
+
+Commit deviation is a possible indicator of new committer proportion. As commit activity per author increases, so does the variability of commit activity from month to month. A project with a higher proportion of contributors with fewer months of commit history could be an indication of high developer interest. "Drive bys" are contributions from people do not continue to stay involved with the project, although they may continue to consume it. A high number of "drive bys" could indicate a strong developer user base.
+
+Do authors make roughly the same number of commits each month?
+
+The plot below shows what percentage of months the author comitted on have the same commit activity. In other words, for what percentage of months was the commit pattern observed?
+
+This density plot would indicate that authors are fairly consistent in terms of their monthly commit activity. This consistency is likely due to the fact that the majority of authors have less than 6 months of commits.
+
+```{r}
+ggplot(mx_commits_by_author_summary, 
+       aes(x=commit_freq_pct*100)) + 
+  geom_density() +
+  xlab("% of Months with Observed Commit Pattern")
+
+```
+
+The next plot looks at how much variation there was amongst commit patterns for authors for each month. What percentage of months share an observed commit pattern? If an author has the same commit pattern for 5 out of their 10 months, then 50% of that author's months share a commit pattern. The higher this percentage, the lower the overall deviation.
+
+This density plot would indicate that a majority of authors show 100% shared commit pattern. This consistency is likely due to the fact that the majority of authors have less than 6 months of commits.
+
+```{r}
+ggplot(mx_commits_by_author_summary, 
+       aes(x=freq_bins_pct*100)) + 
+  geom_density() +
+  xlab("% of Months with Shared Commit Pattern")
+```
+
+Do authors who have contributed for more than 6 months show more deviation in their commit patterns?
+
+Authors with greater than 6 months of commit history represent about 7% of all authors (71/1002). The majority of authors only have one month of commit activity.
+
+```{r}
+ggplot(mx_commits_by_author_summary %>% filter(commits_months > 6), 
+       aes(x=commit_freq_pct*100)) + 
+  geom_bar() +
+  xlab("% of Months with Observed Commit Pattern") +
+  xlim(0,100)
+
+ggplot(mx_commits_by_author_summary %>% filter(commits_months > 6), 
+       aes(x=freq_bins_pct*100)) + 
+  geom_bar() +
+  xlab("% of Months with Shared Commit Pattern") +
+  xlim(0,100)
+
+```
+
+When did authors with only one commit month make that commit?
+
+```{r}
+ggplot(data = mx_authors_commits, aes(x = factor(commit_month))) +
+  geom_point(aes(y = num_authors_single, color="Singles"), group=2) +
+  geom_line(aes(y = num_authors_single, color="Singles"), group=2) +
+  ylab("Count") +
+  xlab("Month") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+What proportion of authors each month do single authors represent?
+
+Around 25-40% of authors each month will only ever commit for that month. When there are less authors in a particular month, the proportion of single month committers is significantly lower.
+
+```{r}
+mx_authors_commits <- mx_authors_commits %>% mutate(authors_single_pct=num_authors_single/num_authors)
+
+ggplot(data = mx_authors_commits, aes(x = factor(commit_month))) +
+  geom_point(aes(y = num_authors, color="Authors"), group=1) +
+  geom_line(aes(y = num_authors, color="Authors"), group=1) +
+  geom_point(aes(y = num_authors_single, color="Singles"), group=2) +
+  geom_line(aes(y = num_authors_single, color="Singles"), group=2) +
+  ylab("Count") +
+  xlab("Month") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(data = mx_authors_commits, aes(x = factor(commit_month), y = authors_single_pct*100)) +
+  geom_point(group=1) +
+  geom_line(group=1) +
+  ylab("% of Authors w/ 1 Month") +
+  xlab("Month") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+
+## Commit Author Frequency vs Deviation
+
+Another indicator of project participation levels is the overall number of commits per author compared with commit frequency. Do authors that commit more frequently tend to have significantly more commits as well? In the Tensorflow project we see a small increase.
+
+```{r}
+ggplot(mx_commits_by_author_nobot %>% filter(commit_month > "Nov 2015"), 
+       aes(x=factor(commits_months), y=round(commits_pct,2)*100, colour=factor(commits_max))) + 
+  geom_jitter() +
+  xlab("# Months w/ Commits") +
+  ylab("% Commits per Author") +
+  guides(colour=guide_legend(title="Commits"))
+
+```
+
+
+## Commits per Author Percent Change
+
+Early on in the project there were less authors as is indicated by the higher proportion of commits. As the project has progressed however, the number of commits is more distributed.
+
+The "tensor-gardener" is the only "author" consistently responsible for a high proportion of the commit activity. This comes from Google internally when employees make commits and they can't be linked to an existing Github account. The proportion of these "Google" commits appears to be gradually decreasing which could indicate an increase in non-Google authors.
+
+```{r}
+ggplot(data = mx_commits_by_author, 
+       aes(x = factor(commit_month), y = commits_pct, fill=author)) +
+  geom_bar(stat="identity", position="stack") +
+  ylab("Commits") +
+  xlab("Month") +
+  theme(legend.position="none") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Excluded the "bot" account
+ggplot(data = mx_commits_by_author %>% filter(author != "a. unique tensorflower"), 
+       aes(x = factor(commit_month), y = commits_pct, fill=author)) +
+  geom_bar(stat="identity", position="stack") +
+  ylab("Commits") +
+  xlab("Month") +
+  theme(legend.position="none") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Does the commit percentage change increase or decrease over time?  That is, does an author need to make more or less commits to achieve the same commit proportion?
+
+If project activity is gradually increasing, then we should see a decrease. That is, as more authors engage with a project and make more commits, an author needs to make more commits to acheive the same commit proportion. If project activity is becoming more distributed, authors who started out with a higher percentage of commits should gradually start representing a lower percentage. If, however, project activity is not well distributed, then we would contiue to see a high percentage of commits from the original authors, thus indicating a decreasing or neutral percent change.
+
+```{r}
+ggplot(mx_commits_by_author_nobot %>% 
+         filter(commit_month > "Nov 2015" & author_commits_log > 1 & author_commits_log < 5), 
+       aes(x=factor(commit_month), y=commits_pct*100, colour=factor(commits_max))) + 
+  geom_jitter() +
+  xlab("Month") +
+  ylab("Commits per Author (%)") +
+  guides(colour=guide_legend(title="Commits")) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+Is any one group responsible for most of the single-month contributors?
+
+Authors commiting with google.com email domains are only responsible for a small proportion of the single commit month activity. While it's the largest proportion of any non-email-provider host, it's not likely that Google is dominating the single-month committer population.
+
+```{r}
+mx_commits_hosts <- merge(mx_commits_by_author %>% filter(commits_months == 1), 
+                          mx_parsed %>% select(author, commit_month, email_id_host, email_id),
+                          by=c("author", "commit_month"))
+
+mx_commits_hosts <- mx_commits_hosts %>% 
+  group_by(commit_month, author, email_id_host) %>%
+  summarise(commits=n(), email_id=first(email_id)) %>%
+  group_by(commit_month, author) %>%
+  mutate(num_hosts=n_distinct(email_id_host)) %>%
+  group_by(commit_month, email_id_host) %>%
+  mutate(host_authors=n_distinct(author)) %>%
+  group_by(email_id_host) %>%
+  mutate(total_authors=n_distinct(author))
+
+ggplot(mx_commits_hosts %>% filter(host_authors > 1),
+       aes(x=factor(commit_month), y=num_hosts, fill=reorder(email_id_host, -total_authors))) + 
+  geom_bar(stat="identity") +
+  xlab("Months") +
+  ylab("Authors w/ 1 Commit Month") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  guides(fill=guide_legend(title="Hosts"))
+```
+
+
+# Conclusions
+
+The key advantage of git log analysis is that all of the information is available locally (once the repository has been cloned) and does not take up much space. This is particularly advantageous for older projects that may have a large number of commits.
+
+The key disadvantage is the inability to easily consolidate authors. Company affiliations identified through email address also need to be normalized and a change in company needs to be properly indicated for the new months. This was not fully addressed in this analysis. Tensorflow is a fairly young project so it isn't as significant here as it would be with an older project where more authors may have changed companies.
+
+The analysis of Tensorflow's commit history suggests that a growing project will trend towards a smaller proportion of overall commits per month per author. The overall number of commits per author on its own does not provide much insight into overall community health or growth. The proportion of commits per author and whether the same number of commits per author goes up or down in proportion, however, is an indicator of activity distribution and is a potentially useful metric.
+
+## Proposed Metrics
+
+### Commit Months
+
+Frequency of months with at least one commit. Shows consistency in involvement over time.
+
+### Commit Delta
+
+Rate of change in commit frequency. An overall low rate of change suggests a high proportion of new authors.
+
+### Commit Deviation
+
+Frequency of change in commit frequency. A high frequency suggests a high proportion of new authors.
+
+### Commit Percent Change
+
+Commit frequency percent change. A high decrease suggests an increase in overall commit distribution per author.
+
+## Next Steps
+
+* Apply the proposed metrics to a larger sample of projects to see how they compare.
+* Improve author normalization
+* Improve company-domain identification
+* Compare domain identification with Github profile company
+
+# References
+
+*  "Why Google Stores Billions of Lines of Code in a Single Repository" Communications of the ACM, Vol. 59 No. 7, Pages 78-87. https://cacm.acm.org/magazines/2016/7/204032-why-google-stores-billions-of-lines-of-code-in-a-single-repository/fulltext
+* "How the TensorFlow team handles open source support" O'Reilly Ideas. May 4, 2017. https://www.oreilly.com/ideas/how-the-tensorflow-team-handles-open-source-support
+
+
