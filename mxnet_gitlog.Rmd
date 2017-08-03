@@ -103,7 +103,10 @@ email_provider_domains <- c("gmail.com",
                             "me.com",
                             "live.com",
                             "yahoo.com", # manual verification showed these are not yahoo employees
-                            "yahoo.fr")
+                            "yahoo.fr",
+                            "foxmail.com",
+                            "protonmail.com",
+                            "msn.com")
 ```
 
 ```{r normalize_authors}
@@ -374,7 +377,7 @@ According to the Github Pulse Report, "Excluding merges, 155 authors have pushed
 
 ```{r}
 mx_pulse_check <- mx_parsed_authors %>% 
-  filter(commit_date > as.Date("2017-06-16"))
+  filter(commit_date > as.Date("2017-06-30"))
 
 mx_pulse_check_authors <- mx_pulse_check %>% 
   group_by(author) %>% 
@@ -382,11 +385,11 @@ mx_pulse_check_authors <- mx_pulse_check %>%
 
 total_authors_pulse_check <- nrow(mx_pulse_check_authors)
 paste("Total Unique Authors: ", total_authors_pulse_check)
-paste("Difference From Pulse Check: ", total_authors_pulse_check - 155)
+paste("Difference From Pulse Check: ", total_authors_pulse_check - 54)
 
 total_commits_pulse_check <- n_distinct(mx_pulse_check$sha)
 paste("Total Commits: ", total_commits_pulse_check)
-paste("Difference From Pulse Check: ", total_commits_pulse_check - 838)
+paste("Difference From Pulse Check: ", total_commits_pulse_check - 148)
 ```
 
 Therefore, we can conclude that our methods for counting commits match Github's results. Despite our previous author discrepancy, the method appears to sufficiently accurate for the purposes of this analysis.
@@ -395,7 +398,7 @@ Therefore, we can conclude that our methods for counting commits match Github's 
 
 ## Unique Authors per Month
 
-The number of unique authors has grown steadily per month. With a huge spike in March 2017.
+The number of unique authors has grown steadily per month.
 
 ```{r}
 ggplot(data = mx_authors_commits, aes(x = factor(commit_month))) +
@@ -408,27 +411,12 @@ ggplot(data = mx_authors_commits, aes(x = factor(commit_month))) +
 
 ## Proportion of Authors by Email Domain
 
-How many Google authors do we see? Tensorflow was originally a closed-source Google project that Google open sourced. It does not have an open governance model. Identifying the proportion of contributors that come from Google indicates the level of involvement from non-Google affliates.
 
 ```{r}
-
-# All emails vs google.com
-ggplot(mx_authors_hosts_month %>% 
-         mutate(is_google=ifelse(email_id_host=="google.com" | email_id_host=="tensorflow.org", 
-                                 "Google", "Not Google")),
-       aes(x=factor(commit_month), y=num_authors, fill=is_google)) + 
-  geom_bar(stat="identity") +
-  xlab("Months") +
-  ylab("Authors") +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1))
-
-# Exclude Google + email-provider addresses
+# Exclude email-provider addresses
 # more than one overall author (otherwise there are too many to plot)
 ggplot(mx_authors_hosts_month_merge %>% 
-         filter( 
-           !email_id_host %in% email_provider_domains 
-           & (total_authors > 1 
-              & !(email_id_host == "google.com" | email_id_host =="tensorflow.org"))),
+         filter(!email_id_host %in% email_provider_domains & total_authors > 1),
        aes(x=factor(commit_month), y=num_authors, fill=reorder(email_id_host, -total_authors))) + 
   geom_bar(stat="identity", position="dodge") +
   xlab("Months") +
@@ -442,7 +430,7 @@ ggplot(mx_authors_hosts_month_merge %>%
 
 ## Unique Authors vs Total Commits per Month
 
-Overall in the Tensorflow project, the number of authors and commits are not only increasing but appear to be correlated. Logically one can assume that more authors means more commits.
+Overall in the Tensorflow project, the number of authors and commits are not only decreasing but appear to be correlated. Logically one can assume that less authors means less commits.
 
 ```{r}
 ggplot(data = mx_authors_commits, aes(x = factor(commit_month))) +
@@ -467,21 +455,10 @@ How are commits per author distributed as the number of authors per month increa
 
 As the number of authors increases the proportion of commits becomes more evenly distributed, so we see a downward trend in percent of commits per author. Early on in the project, more authors had a higher proportion of the commits.
 
-The second plot filters out the "A. Unique TensorFlower" bot which is clearly responsible for the largest proportion of commits as the number of authors increases. When internal Google commits are pushed upstream, authors that can't be matched to Github accounts get this account instead. 
-
-
 ```{r}
 ggplot(data = mx_commits_by_author, aes(x = num_authors)) +
   geom_jitter(aes(y=num_author_commits/2, color="Commits")) +
   geom_jitter(aes(y=commits_pct * 100, color="Commits %")) + # scaled for comparison
-  geom_smooth(aes(y=commits_pct*100), method="lm", se=FALSE) +
-  xlab("Authors") +
-  ylab("Commits per Author (Scaled")
-
-ggplot(data = mx_commits_by_author %>% filter(author != "a. unique tensorflower"), 
-       aes(x = num_authors)) +
-  geom_jitter(aes(y=num_author_commits/2, color="Commits")) +
-  geom_jitter(aes(y=commits_pct*100, color="Commits %")) + # scaled for comparison
   geom_smooth(aes(y=commits_pct*100), method="lm", se=FALSE) +
   xlab("Authors") +
   ylab("Commits per Author (Scaled)")
@@ -499,7 +476,7 @@ Commits per author were grouped into bins based on the rounded natural log. The 
 The highest per month commit frequency seen is 1-4 per month.
 
 ```{r}
-ggplot(mx_commits_by_author_nobot, aes(x=factor(commits_max))) + 
+ggplot(mx_commits_by_author, aes(x=factor(commits_max))) + 
   geom_density() +
   xlab("Commits per Author")
 ```
@@ -509,7 +486,7 @@ How many months have authors been contributing? Earlier analysis indicated that 
 The majority of Authors only have commits for 6 or less months.
 
 ```{r}
-ggplot(mx_commits_by_author_nobot, aes(x=factor(commits_months))) + 
+ggplot(mx_commits_by_author, aes(x=factor(commits_months))) + 
   geom_bar() +
   xlab("Author Months")
 ```
@@ -604,7 +581,7 @@ ggplot(data = mx_authors_commits, aes(x = factor(commit_month), y = authors_sing
 Another indicator of project participation levels is the overall number of commits per author compared with commit frequency. Do authors that commit more frequently tend to have significantly more commits as well? In the Tensorflow project we see a small increase.
 
 ```{r}
-ggplot(mx_commits_by_author_nobot %>% filter(commit_month > "Nov 2015"), 
+ggplot(mx_commits_by_author %>% filter(commit_month > "Nov 2015"), 
        aes(x=factor(commits_months), y=round(commits_pct,2)*100, colour=factor(commits_max))) + 
   geom_jitter() +
   xlab("# Months w/ Commits") +
@@ -629,8 +606,16 @@ ggplot(data = mx_commits_by_author,
   theme(legend.position="none") +
   theme(axis.text.x = element_text(angle = 90, hjust = 1))
 
-# Excluded the "bot" account
-ggplot(data = mx_commits_by_author %>% filter(author != "a. unique tensorflower"), 
+# Authors > 6 months
+ggplot(data = mx_commits_by_author %>% filter(commits_months > 6), 
+       aes(x = factor(commit_month), y = commits_pct, fill=author)) +
+  geom_bar(stat="identity", position="stack") +
+  ylab("Commits") +
+  xlab("Month") +
+  theme(legend.position="none") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(data = mx_commits_by_author %>% filter(commits_months < 4), 
        aes(x = factor(commit_month), y = commits_pct, fill=author)) +
   geom_bar(stat="identity", position="stack") +
   ylab("Commits") +
@@ -644,8 +629,8 @@ Does the commit percentage change increase or decrease over time?  That is, does
 If project activity is gradually increasing, then we should see a decrease. That is, as more authors engage with a project and make more commits, an author needs to make more commits to acheive the same commit proportion. If project activity is becoming more distributed, authors who started out with a higher percentage of commits should gradually start representing a lower percentage. If, however, project activity is not well distributed, then we would contiue to see a high percentage of commits from the original authors, thus indicating a decreasing or neutral percent change.
 
 ```{r}
-ggplot(mx_commits_by_author_nobot %>% 
-         filter(commit_month > "Nov 2015" & author_commits_log > 1 & author_commits_log < 5), 
+ggplot(mx_commits_by_author %>% 
+         filter(author_commits_log > 1 & author_commits_log < 5), 
        aes(x=factor(commit_month), y=commits_pct*100, colour=factor(commits_max))) + 
   geom_jitter() +
   xlab("Month") +
