@@ -7,7 +7,8 @@ params:
   mx_path: "incubator-mxnet"
   mx_sha: '92a93b80'
   mx_out: 'data/mxnet_gitlog.txt'
-
+  gh_id: "1e3293539b46312ecceb"
+  gh_secret: "65ed109ae2c3aebb895ef151ea9f34ad8c913565"
 ---
 
 ```{r setup, include=FALSE}
@@ -16,6 +17,8 @@ knitr::opts_chunk$set(echo = TRUE)
 library(dplyr)
 library(ggplot2)
 library(gh)
+library(httr)
+library(jsonlite)
 library(readr)
 library(reshape2)
 library(stringr)
@@ -25,7 +28,7 @@ library(zoo)
 
 # Overview
 
-This notebook lives in Github and is the first in a series: https://github.com/missaugustina/tensorflow_reports
+This notebook lives in Github and is the first in a series: https://github.com/missaugustina/mxnet_reports
 
 # Commit History
 
@@ -63,11 +66,30 @@ Previous consolidation attempts found the following authors having deviations. B
 
 ```{r parsed_emails}
 # manual updates for known authors that make things complicated
+# TODO create table from commits_github_login and merge instead
 mx_parsed_emails <- mx_parsed_dates %>% 
   mutate(name=ifelse(name=="tornadomeet", "wei wu", name),
          name=ifelse(name=="yuan (terry) tang" | name == "terrytangyuan", "terry tang", name),
-         name=ifelse(name=="el potaeto" | name=="pommedeterresautee", "michaël benesty", name),
-         name=ifelse(name=="=", "luke metz", name))
+         name=ifelse(name=="el potaeto" 
+                     | name=="pommedeterresautee", "michaël benesty", name),
+         name=ifelse(name=="=", "luke metz", name),
+         name=ifelse(name=="codingcat", "nan zhu", name),
+         name=ifelse(name=="kaixhin", "kai arulkumaran", name),
+         name=ifelse(name=="byliu", "liu benyuan", name),
+         name=ifelse(name=="matthew hill", "matt hill", name),
+         name=ifelse(name=="linmin", "lin min", name),
+         name=ifelse(name=="nitnelave", "valentin tolmer", name),
+         name=ifelse(email=="qiaohaijun@gmail.com" 
+                     | email=="qiaohaijun@users.noreply.github.com" 
+                     | email=="dongguosheng179@gmail.com"
+                     | name=="dongguosheng" 
+                     | name=="qiaohaijun", 
+                     "qiao hai-jun", name),
+         name=ifelse(name=="shallyan", "yan xiao", name),
+         name=ifelse(name=="wuwei", "wei wu", name),
+         name=ifelse(name=="wang gu", "gu wang", name),
+         name=ifelse(name=="yzhang87", "yu zhang", name)
+         )
 
 # known email provider domains
 email_provider_domains <- c("gmail.com", 
@@ -82,8 +104,6 @@ email_provider_domains <- c("gmail.com",
                             "live.com",
                             "yahoo.com", # manual verification showed these are not yahoo employees
                             "yahoo.fr")
-
-#rm(mx_parsed_dates)
 ```
 
 ```{r normalize_authors}
@@ -227,9 +247,25 @@ mx_commits_by_author_summary <- mx_commits_by_author %>% # was mx_commits_by_aut
 
 How different are metrics in the Gitlog compared to what Github reports?
 
+## Commits
+
+On July 31, 2017, Github reported the total "commits" is 5,719. This is the same number as the commits retrieved from the git log.
+
+```{r check_commits}
+
+# commits stats
+total_commits <- nrow(mx_parsed_authors)
+paste("Total Commits in Git Log:", total_commits)
+total_github_commits <- 5719 # see screenshot
+paste("Total Commits reported by GitHub:", total_github_commits)
+paste("Difference from Github:", total_github_commits - total_commits)
+
+```
+
+
 ## Contributors
 
-On July 31, 2017, Github reported the total "contributors" is 391. We have 34 more authors than what is reported in Github.
+On July 31, 2017, Github reported the total "contributors" is 391. If our normalization is accurate, Github should have more authors than us. A single author with multiple Github accounts or using an email address unassociated with a Github account would be counted by Github multiple times. 
 
 ```{r check_authors}
 # authors stats
@@ -238,16 +274,19 @@ mx_authors_total <- mx_parsed_authors %>%
   summarise(email_id=first(email_id), commits=n())
 
 total_authors <- nrow(mx_authors_total)
-
 paste("Total Authors in Git Log:", total_authors)
+total_github_authors <- 391 # see screenshot
+paste("Total Authors reported by GitHub:", total_github_authors)
 
-paste("Difference from Github:", total_authors - 391)
+authors_difference <- total_authors - total_github_authors
+
+paste("Difference from Github:", authors_difference)
+
+# TODO: figure out this discrepancy
 ```
 
-```{r, eval=FALSE}
-library(httr)
-library(jsonlite)
-
+Because this is a big difference, we should get commits from the Github API to compare logins.
+```{r gh_api_commits, eval=FALSE}
 url <- "https://api.github.com/repos/apache/incubator-mxnet/commits"
 
 query_params <- list(
@@ -273,34 +312,55 @@ commits <- commits %>% mutate(sha_long=sha, sha = str_sub(sha_long, 1, 7))
 saveRDS(commits, "mxnet_commits.rds")
 ```
 
-```{r}
+The Github API returned 5 additional commits compared to a) what is in the Git log and b) what is reported on Github's web page. Github uses the number of commits in the Git log to determine the total number of commits. Therefore, we can exclude any commits from the API that are not in the Git log.
+
+The number of authors reported by the API commits is also slightly higher than what Github reports. Given what we know about commits, it is most likely that the discrepancy is explained by a unique author in a more recent commit than what is in the Git log.
+
+Another interesting observation is that authors that do not have a Github login are not counted as part of the total. We will explore this further.
+
+```{r, check_commits}
 commits <-readRDS("mxnet_commits.rds")
 
-commits_check <- merge(mx_parsed_authors, commits, by="sha", all=TRUE)
+github_api_commits_cnt <- nrow(commits)
+paste("The number of commits from the Github API is:", github_api_commits_cnt)
+paste("Difference between Github API and Github:", github_api_commits_cnt - total_github_commits)
 
-commits_check_summary <- commits_check %>%
-  group_by(author.login, email_id) %>% 
-  summarise(num_ids = n(), sha=first(sha))
+commits_github_na_login <- commits %>% filter(is.na(author.login))
+commits_github_login <- commits %>% filter(!is.na(author.login))
 
-commits_authors_check <- merge(commits_check_summary,
-                               mx_authors_total,
-                               by="email_id", all = TRUE)
-
-commits_authors_check <- commits_authors_check %>% group_by(author) %>% mutate(num_ids=n())
-commits_author_missing <- commits_authors_check %>% filter(is.na(author)) %>% ungroup()
-commits_author_missing_join <- merge(
-  commits %>% select(sha, author.login, commit.committer.name, commit.committer.email), 
-  commits_author_missing %>% select(sha), by="sha")
-commits_author_missing_lookup <- merge(commits_author_missing_join, mx_gh_authors_lookup, 
-                                       by.x="commit.committer.email", by.y="email")
-
-# missing login, we've identified them with others but Github thinks they are unique
-commits_login_missing <- commits_authors_check %>% filter(is.na(author.login))
-paste("Github has", nrow(commits_login_missing), "more contributors than we do.")
-
-  
+# do githubs own numbers match themselves?
+github_api_cnt <- length(unique(commits_github_login$author.login))
+github_na_cnt <- length(commits_github_na_login$author.login)
+paste("Per commits from the Github API, the number of authors is:", github_api_cnt)
+paste("Number of commits with no author.login:", github_na_cnt)
 ```
 
+When we exclude all authors without a Github login, our total authors is slight less than Github's. When we consider authors we've identified as distinct that have multiple Github accounts, we are able to acheive about the same total of authors as what Github reports. The discrepancy is due to a timezone issue. Github uses "local" time, which is the local timezone of the commit author per the commit timestamp. We are using UTC to normalize the timezone.
+
+```{r, gitlog_extra_authors}
+# commits we have that are also in github
+commits_check <- commits %>% inner_join(mx_parsed_authors, by="sha")
+paste("")
+paste("Unique Authors (Gitlog):", length(unique(commits_check$author)))
+
+commits_check_na <- commits_check %>% 
+  filter(!is.na(author.login)) %>%
+  select(author, author.login) %>%
+  unique()
+
+paste("Unique Authors (Gitlog, No Github Login):", length(unique(commits_check_na$author)))
+
+commits_check_multi_login <- commits_check_na %>%
+  group_by(author) %>%
+  mutate(num_gh_logins=n_distinct(author.login)) %>%
+  filter(num_gh_logins > 1) %>%
+  mutate(num_extra_logins = num_gh_logins-1) %>%
+  select(author, num_extra_logins) %>%
+  unique()
+
+paste("Unique Authors (Single in Gitlog, Multiple Github Login):", 
+      sum(commits_check_multi_login$num_extra_logins))
+```
 
 ##  Pulse Report
 
